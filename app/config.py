@@ -5,47 +5,47 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
-    
+
     # API Settings
     app_name: str = "YouTube Quality Checker"
     api_version: str = "v1"
     debug: bool = False
-    
+
     # PostgreSQL
     postgres_user: str
     postgres_password: str
     postgres_host: str
     postgres_port: int
     postgres_db: str
-    
+
     # Qdrant Vector DB
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
-    qdrant_api_key: Optional[str] = None
-    
+
+    # External Services
+    embedding_service_url: str
+
     # Google Gemini
     gemini_api_key: str
     gemini_model: str = "gemini-2.0-flash"
-    
+    gemini_embedding_model: str = "gemini-embedding-001"
+
     # YouTube
     youtube_api_key: Optional[str] = None
-    
-    # ML Models
-    image_model: str = "openai/clip-vit-large-patch14"  # CLIP for better embeddings
-    text_model: str = "sentence-transformers/all-mpnet-base-v2"  # Better text model
-    
+
     # Analysis Thresholds
     duplicate_threshold: float = 0.30
     image_similarity_threshold: float = 0.92
     text_similarity_threshold: float = 0.85
     static_video_confidence_threshold: float = 0.8
     inactive_days: int = 10
-    
+
     # Performance
     batch_size: int = 32
     max_concurrent_downloads: int = 5
-    embedding_dimension: int = 768
-    
+    text_embedding_dimension: int = 1536
+    image_embedding_dimension: int = 1152
+
 @lru_cache
 def get_settings():
     return Settings()

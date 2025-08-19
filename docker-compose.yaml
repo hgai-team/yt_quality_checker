@@ -1,0 +1,124 @@
+services:
+  dev-yt:
+    image: krntl/yt-quality-checker:latest
+    container_name: dev-yt
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import torch; assert torch.cuda.is_available()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    env_file:
+      - .env
+    ports:
+      - 8000:8000
+    volumes:
+      - "./app:/app"
+      - "./model_weights:/root/.cache/huggingface/hub"
+
+    networks:
+      - yt-network
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+    depends_on:
+      - siglip-embedder
+      - qdrant-yt
+      - postgres-yt
+
+  siglip-embedder:
+    image: krntl/siglip-embedder:latest
+    container_name: dev-siglip-embedder
+
+    restart: unless-stopped
+
+    ports:
+      - 8001:8001
+    volumes:
+      - "./siglip-embedder/main.py:/app/main.py"
+      - "./model_weights:/root/.cache/huggingface/hub"
+
+    networks:
+      - yt-network
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+
+  qdrant-yt:
+    image: qdrant/qdrant:v1.14.1
+    container_name: dev-qdrant-yt
+
+    restart: unless-stopped
+
+    ports:
+      - 6331:6333
+      - 6332:6334
+    volumes:
+      - dev_qdrant_yt:/qdrant/storage
+    networks:
+      - yt-network
+    deploy:
+        resources:
+          limits:
+            memory: 2G
+            cpus: '3.0'
+          reservations:
+            memory: 512M
+            cpus: '1.25'
+
+  postgres-yt:
+    image: postgres:15
+    container_name: dev-postgres-yt
+    ports:
+      - '5431:5432'
+
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${postgres_user}
+      POSTGRES_PASSWORD: ${postgres_password}
+      POSTGRES_DB: ${postgres_db}
+
+    volumes:
+      - dev_postgres_yt:/var/lib/postgresql/data
+
+    networks:
+      - yt-network
+
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '3.0'
+        reservations:
+          memory: 256M
+          cpus: '1.25'
+
+networks:
+  yt-network:
+    external: true
+
+volumes:
+  dev_qdrant_yt:
+    external: true
+  dev_postgres_yt:
+    external: true

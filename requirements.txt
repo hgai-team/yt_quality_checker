@@ -1,34 +1,35 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
-python-multipart==0.0.6
-aiofiles==23.2.1
-httpx==0.25.1
-asyncpg==0.29.0
-sqlalchemy==2.0.23
-alembic==1.12.1
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-multipart
+aiofiles
+httpx
+asyncpg
+sqlalchemy
+sqlmodel
+alembic
 
 # YouTube & Media
-yt-dlp==2023.11.16
-opencv-python-headless==4.8.1.78
-Pillow==10.1.0
-imagehash==4.3.1
+yt-dlp
+opencv-python-headless
+Pillow
+imagehash
 
 # Vector DB
-qdrant-client==1.7.0
+qdrant-client
 
 # ML & AI
-numpy==1.24.3
-torch==2.1.1
-torchvision==0.16.1
-transformers==4.36.0
-sentence-transformers==2.2.2
-clip-retrieval==2.36.1
-timm==0.9.12
-google-generativeai==0.3.0
+numpy
+torch
+torchvision
+transformers
+sentence-transformers
+clip-retrieval
+timm
+google-genai
 
 # Utils
-python-dotenv==1.0.0
-structlog==23.2.0
-tenacity==8.2.3
+python-dotenv
+structlog
+tenacity
