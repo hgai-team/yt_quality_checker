@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     max_concurrent_downloads: int = 5
     text_embedding_dimension: int = 1536
     image_embedding_dimension: int = 1152
+    
+    project_keywords: dict = {
+        "gaming": ["minecraft", "valorant", "gameplay", "gaming", "game", "playthrough"],
+        "cooking": ["recipe", "cooking", "food", "cuisine", "chef", "baking"],
+        "tech": ["technology", "gadget", "review", "unboxing", "tech", "software"],
+        "education": ["tutorial", "learn", "education", "course", "lesson", "teaching"],
+        "entertainment": ["comedy", "funny", "entertainment", "vlog", "reaction", "challenge"]
+    }
 
 @lru_cache
 def get_settings():

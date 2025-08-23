@@ -31,8 +31,8 @@ class PostgresEngineManager:
                 db_uri,
                 echo=settings.debug,
                 pool_pre_ping=True,
-                pool_size=10,
-                max_overflow=20,
+                pool_size=15,
+                max_overflow=30,
             )
         return cls._engine
 

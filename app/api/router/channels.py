@@ -10,9 +10,9 @@ from models.database import Channel, Video, AnalysisResult
 from services.data_fetcher import IncrementalDataFetcher
 from services.thumbnail_analyzer import ThumbnailAnalyzer
 from services.text_analyzer import TextAnalyzer
-# from services.video_analyzer import AdvancedVideoAnalyzer
-# from services.channel_monitor import ChannelMonitor
-# from services.business_rules import BusinessRulesEngine
+from services.video_analyzer import VideoAnalyzer
+from services.channel_monitor import ChannelMonitor
+from services.business_rules import BusinessRulesEngine
 
 from config import get_settings
 import structlog
@@ -44,6 +44,10 @@ async def analyze_channel(
     thumb_analyzer = ThumbnailAnalyzer()
     text_analyzer = TextAnalyzer()
 
+    channel_monitor = ChannelMonitor()
+    video_analyzer = VideoAnalyzer()
+    business_rules = BusinessRulesEngine()
+    
     async def run_analyze_thumbnails():
         async with PEM.get_session() as db:
             return await thumb_analyzer.analyze_channel_thumbnails(db, request.channel_id)
@@ -51,18 +55,36 @@ async def analyze_channel(
     async def run_analyze_text():
         async with PEM.get_session() as db:
             return await text_analyzer.analyze_channel_text(db, request.channel_id)
+        
+    async def run_channel_monitor():
+        async with PEM.get_session() as db:
+            return await channel_monitor.check_activity(db, request.channel_id)
+        
+    async def run_video_analyzer():
+        async with PEM.get_session() as db:
+            return await video_analyzer.analyze_channel_videos(db, request.channel_id)
+        
+    async def run_business_rules():
+        async with PEM.get_session() as db:
+            return await business_rules.validate_channel(db, request.channel_id)
 
     # chạy song song, mỗi task có session riêng
-    thumb_result, text_result = await asyncio.gather(
+    thumb_result, text_result, channel_monitor, video_analyzer, business_rules  = await asyncio.gather(
         run_analyze_thumbnails(),
-        run_analyze_text()
+        run_analyze_text(),
+        run_channel_monitor(),
+        run_video_analyzer(),
+        run_business_rules()
     )
 
     return {
         "status": "success",
         "channel_id": request.channel_id,
         "thumbnail_analysis": thumb_result,
-        "text_analysis": text_result
+        "text_analysis": text_result,
+        "channel_monitor": channel_monitor,
+        "video_analysis": video_analyzer,
+        "business_rules": business_rules
     }
 
 
