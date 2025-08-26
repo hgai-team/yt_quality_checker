@@ -86,7 +86,6 @@ class BusinessRulesEngine:
             # Kiểm tra CHỈ trong description
             if hged_pattern.search(desc):
                 mbt_count += 1
-                print(hged_pattern.search(desc))
 
         return {
             "uses_mbt": mbt_count > 0,

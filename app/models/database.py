@@ -20,6 +20,12 @@ class Channel(Base):
     channel_name = Column(String)
     channel_url = Column(String)
     project_name = Column(String, index=True)
+    
+    # New fields from Excel
+    networks = Column(String, nullable=True)
+    department = Column(String, nullable=True)
+    employee_name = Column(String, nullable=True)
+    employee_id = Column(String, nullable=True)
 
     # Tracking
     created_at   = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -43,6 +49,9 @@ class Channel(Base):
 
     __table_args__ = (
         Index('idx_channel_project', 'project_name'),
+        Index('idx_channel_networks', 'networks'),
+        Index('idx_channel_department', 'department'),
+        Index('idx_channel_employee', 'employee_id'),
     )
 
 

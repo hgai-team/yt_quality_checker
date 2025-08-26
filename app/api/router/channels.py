@@ -27,6 +27,12 @@ class ChannelRequest(BaseModel):
     channel_id: str
     project_name: Optional[str] = None
     force_refresh: bool = False
+    
+    # New optional fields from Excel
+    networks: Optional[str] = None
+    department: Optional[str] = None
+    employee_name: Optional[str] = None
+    employee_id: Optional[str] = None
 
 
 class AnalysisRequest(BaseModel):
@@ -115,6 +121,23 @@ async def _save_snapshot(db: AsyncSession, channel_id: str, payload: dict,
     await db.refresh(ar)
     return ar
 
+def _collect_static_lists(rows: List[Channel]) -> dict:
+    projects = []
+    departments = []
+    networks = []
+    for ch in rows:
+        if ch.project_name and ch.project_name not in projects:
+            projects.append(ch.project_name)
+        if getattr(ch, "department", None) and ch.department not in departments:
+            departments.append(ch.department)
+        if getattr(ch, "networks", None) and ch.networks not in networks:
+            networks.append(ch.networks)
+    return {
+        "all_projects": projects,
+        "all_departments": departments,
+        "all_networks": networks,
+    }
+
 @router.post("/analyze")
 async def analyze_channel(
     request: AnalysisRequest,
@@ -157,6 +180,11 @@ async def analyze_channel(
         return {
             "status": "success",
             "channel_id": request.channel_id,
+            "channel_name": channel.channel_name,
+            "project_name": channel.project_name,
+            "networks": channel.networks,
+            "department": channel.department,
+            "employee_name": channel.employee_name,
             "source": "cache",
             "analysis_date": cached.analysis_date.isoformat(),
             "severity_score": cached.severity_score,
@@ -228,6 +256,11 @@ async def analyze_channel(
 
     payload = {
         "channel_id": request.channel_id,
+        "channel_name": channel.channel_name,
+        "project_name": channel.project_name,
+        "networks": channel.networks,
+        "department": channel.department,
+        "employee_name": channel.employee_name,
         "thumbnail_analysis": thumb_result,
         "text_analysis": text_result,
         "channel_monitor": monitor_result,
@@ -243,6 +276,11 @@ async def analyze_channel(
             source_last_checked=channel.last_checked,
             f_from=request.from_date, f_to=request.to_date
         )
+        
+    payload["video_analysis"] = {
+        "static_ratio": video_result["static_ratio"],
+        "static_video_ids": [r["video_id"] for r in video_result.get("results", []) if r.get("is_static")]
+    }
 
     return {
         "status": "success",
@@ -268,14 +306,32 @@ async def sync_channel(
         request.force_refresh
     )
 
-    # Update project if provided
-    if request.project_name:
+    # Update channel information if provided
+    if (request.project_name or request.networks or request.department or 
+        request.employee_name or request.employee_id):
         async with PEM.get_session() as db:
             channel = await db.exec(
                 select(Channel).where(Channel.channel_id == request.channel_id)
             )
             channel = channel.first()
-            channel.project_name = request.project_name
+            
+            if channel:
+                # Update existing fields
+                if request.project_name:
+                    channel.project_name = request.project_name
+                
+                # Update new fields
+                if request.networks is not None:
+                    channel.networks = request.networks
+                if request.department is not None:
+                    channel.department = request.department
+                if request.employee_name is not None:
+                    channel.employee_name = request.employee_name
+                if request.employee_id is not None:
+                    channel.employee_id = request.employee_id
+                
+                await db.commit()
+                await db.refresh(channel)
 
     # Trigger background processing for embeddings
     if background_tasks:
@@ -289,7 +345,14 @@ async def sync_channel(
         "channel_id": request.channel_id,
         "total_videos": result["total_videos"],
         "new_videos": result["new_videos"],
-        "existing_videos": result["existing_videos"]
+        "existing_videos": result["existing_videos"],
+        "updated_fields": {
+            "project_name": request.project_name,
+            "networks": request.networks,
+            "department": request.department,
+            "employee_name": request.employee_name,
+            "employee_id": request.employee_id
+        }
     }
 
 async def process_channel_embeddings(channel_id: str):
@@ -329,6 +392,11 @@ async def process_channel_embeddings(channel_id: str):
 async def list_channels_with_issues(
     min_severity: float = Query(1.0, ge=0.0, le=100.0),
     limit: int = Query(50, ge=1, le=200),
+    page: int = Query(1, ge=1),
+    search: Optional[str] = Query(None),
+    project_name: Optional[str] = Query(None),
+    networks: Optional[str] = Query(None),
+    department: Optional[str] = Query(None),
 ):
     """Lấy snapshot mới nhất mỗi kênh và lọc kênh đang 'vi phạm' (theo severity hoặc quy tắc)."""
     async with PEM.get_session() as db:
@@ -342,38 +410,69 @@ async def list_channels_with_issues(
             .subquery()
         )
 
-        q = (
+        # Base join of latest analysis with channel
+        base = (
             select(AnalysisResult, Channel)
             .join(subq, and_(
                 AnalysisResult.channel_id == subq.c.channel_id,
                 AnalysisResult.analysis_date == subq.c.maxd
             ))
             .join(Channel, Channel.channel_id == AnalysisResult.channel_id)
-            .order_by(AnalysisResult.severity_score.desc())
-            .limit(limit * 3)  # kéo dư chút để lọc ở Python
         )
-        res = await db.exec(q)
+
+        # Violation predicate in SQL
+        violate_pred = (
+            (AnalysisResult.severity_score >= min_severity)
+            | (func.coalesce(AnalysisResult.thumbnail_duplicate_ratio, 0) > settings.duplicate_threshold)
+            | (func.coalesce(AnalysisResult.title_duplicate_ratio, 0) > settings.duplicate_threshold)
+            | (func.coalesce(AnalysisResult.description_duplicate_ratio, 0) > settings.duplicate_threshold)
+            | (func.coalesce(AnalysisResult.static_video_ratio, 0) > getattr(settings, "static_video_threshold", 0.5))
+            | (func.coalesce(AnalysisResult.days_inactive, 0) > settings.inactive_days)
+            | (AnalysisResult.project_compliance == False)
+        )
+
+        where_clauses = [violate_pred]
+
+        # Optional filters
+        if search:
+            s = f"%{search.lower()}%"
+            where_clauses.append(
+                func.lower(Channel.channel_name).like(s) | func.lower(Channel.channel_id).like(s)
+            )
+        if project_name:
+            where_clauses.append((Channel.project_name == project_name))
+        if networks:
+            where_clauses.append((Channel.networks == networks))
+        if department:
+            where_clauses.append((Channel.department == department))
+
+        # Compose filtered query
+        filtered_q = base.where(and_(*where_clauses))
+
+        # Count total items
+        count_q = select(func.count()).select_from(filtered_q.subquery())
+        total_items = (await db.exec(count_q)).one()
+
+        # Apply order and pagination
+        paged_q = (
+            filtered_q
+            .order_by(AnalysisResult.severity_score.desc())
+            .offset((page - 1) * limit)
+            .limit(limit)
+        )
+
+        res = await db.exec(paged_q)
         rows = res.all()
 
-        out = []
+        items = []
         for ar, ch in rows:
-            # Điều kiện 'vi phạm' tối thiểu:
-            violate = (
-                (ar.severity_score or 0) >= min_severity
-                or (ar.thumbnail_duplicate_ratio or 0) > settings.duplicate_threshold
-                or (ar.title_duplicate_ratio or 0) > settings.duplicate_threshold
-                or (ar.description_duplicate_ratio or 0) > settings.duplicate_threshold
-                or (ar.static_video_ratio or 0) > getattr(settings, "static_video_threshold", 0.5)
-                or (ar.days_inactive or 0) > settings.inactive_days
-                or (ar.project_compliance is False)
-            )
-            if not violate:
-                continue
-
-            out.append({
+            items.append({
                 "channel_id": ar.channel_id,
                 "channel_name": ch.channel_name,
                 "project_name": ch.project_name,
+                "networks": ch.networks,
+                "department": ch.department,
+                "employee_name": ch.employee_name,
                 "severity_score": ar.severity_score,
                 "last_analyzed": ar.analysis_date.isoformat(),
                 "last_synced_at": ch.last_checked and ch.last_checked.isoformat(),
@@ -386,7 +485,27 @@ async def list_channels_with_issues(
                     "project_compliant": ar.project_compliance,
                 }
             })
-            if len(out) >= limit:
-                break
 
-        return {"status": "success", "count": len(out), "items": out}
+        # Pagination meta
+        items_per_page = limit
+        total_pages = (total_items + items_per_page - 1) // items_per_page if items_per_page > 0 else 1
+
+        # collect lists for filter UI
+        res_all = await db.exec(select(Channel.project_name, Channel.department, Channel.networks))
+        tuple_rows = res_all.all()
+        class _R: pass
+        ch_objs = []
+        for p, d, n in tuple_rows:
+            o = _R(); o.project_name = p; o.department = d; o.networks = n; ch_objs.append(o)
+        lists_payload = _collect_static_lists(ch_objs)
+
+        return {
+            "status": "success",
+            "count": len(items),
+            "items": items,
+            "page": page,
+            "totalPages": total_pages,
+            "totalItems": total_items,
+            "itemsPerPage": items_per_page,
+            **lists_payload
+        }

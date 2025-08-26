@@ -54,6 +54,12 @@ class Settings(BaseSettings):
         "entertainment": ["comedy", "funny", "entertainment", "vlog", "reaction", "challenge"]
     }
 
+    # CORS
+    cors_allow_origins: List[str] = ["*"]
+    cors_allow_credentials: bool = True
+    cors_allow_methods: List[str] = ["*"]
+    cors_allow_headers: List[str] = ["*"]
+
 @lru_cache
 def get_settings():
     return Settings()

@@ -5,6 +5,7 @@ from api.router import channels
 from core.database import init_db
 from core.qdrant_client import vector_store
 import structlog
+from fastapi.middleware.cors import CORSMiddleware
 
 settings = get_settings()
 logger = structlog.get_logger()
@@ -31,6 +32,15 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.api_version,
     lifespan=lifespan
+)
+
+# CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allow_origins,
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=settings.cors_allow_methods,
+    allow_headers=settings.cors_allow_headers,
 )
 
 app.include_router(channels.router, prefix=f"/api/{settings.api_version}")
