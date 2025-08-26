@@ -58,6 +58,8 @@ class PostgresEngineManager:
             except:
                 await session.rollback()
                 raise
+            finally:
+                await session.close()
 
     @classmethod
     async def dispose_engine(cls) -> None:

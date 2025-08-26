@@ -1,7 +1,9 @@
 import re
-from typing import Dict, List
+from typing import List, Optional, Dict
+from datetime import datetime, timezone
+
 from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlmodel import select
+from sqlmodel import select, and_
 from models.database import Channel, Video
 from config import get_settings
 import structlog
@@ -18,7 +20,9 @@ class BusinessRulesEngine:
     async def validate_channel(
         self,
         db: AsyncSession,
-        channel_id: str
+        channel_id: str,
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
     ) -> Dict:
         """Validate business rules for channel"""
         
@@ -31,9 +35,19 @@ class BusinessRulesEngine:
         if not channel:
             return {"error": "Channel not found"}
         
+        conds = [Video.channel_id == channel_id]
+        if from_date:
+            if from_date.tzinfo is not None:
+                from_date = from_date.replace(tzinfo=None)
+            conds.append(Video.upload_date >= from_date)
+        if to_date:
+            if to_date.tzinfo is not None:
+                to_date = to_date.replace(tzinfo=None)
+            conds.append(Video.upload_date <= to_date)
+        
         # Get all videos
         videos_result = await db.exec(
-            select(Video).where(Video.channel_id == channel_id)
+            select(Video).where(and_(*conds))
         )
         videos = videos_result.all()
         
@@ -72,6 +86,7 @@ class BusinessRulesEngine:
             # Kiểm tra CHỈ trong description
             if hged_pattern.search(desc):
                 mbt_count += 1
+                print(hged_pattern.search(desc))
 
         return {
             "uses_mbt": mbt_count > 0,

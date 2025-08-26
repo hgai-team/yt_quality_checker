@@ -6,7 +6,10 @@ import numpy as np
 import uuid
 from uuid import uuid4
 from PIL import Image
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from io import BytesIO
 
@@ -133,19 +136,22 @@ class ThumbnailAnalyzer:
     async def analyze_channel_thumbnails(
         self,
         db: AsyncSession,
-        channel_id: str
+        channel_id: str,
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
     ) -> Dict:
         """Find duplicate thumbnails using vector similarity"""
+        conds = [Video.channel_id == channel_id, Video.thumbnail_embedding_id.isnot(None)]
+        if from_date:
+            if from_date.tzinfo is not None:
+                from_date = from_date.replace(tzinfo=None)
+            conds.append(Video.upload_date >= from_date)
+        if to_date:
+            if to_date.tzinfo is not None:
+                to_date = to_date.replace(tzinfo=None)
+            conds.append(Video.upload_date <= to_date)
 
-        # Get channel videos with embeddings
-        result = await db.exec(
-            select(Video).where(
-                and_(
-                    Video.channel_id == channel_id,
-                    Video.thumbnail_embedding_id.isnot(None)
-                )
-            )
-        )
+        result = await db.exec(select(Video).where(and_(*conds)))
         videos = result.all()
 
         n = len(videos)
@@ -158,11 +164,13 @@ class ThumbnailAnalyzer:
                     "threshold_exceeded": False
                 }
             }
-
+            
+        allowed_ids = {await self.text_to_uuid(v.video_id) for v in videos}
         dup_pairs = await vector_store.find_duplicates_in_channel(
             "youtube_thumbnails",
             channel_id,
-            threshold=settings.image_similarity_threshold
+            threshold=settings.image_similarity_threshold,
+            allowed_ids=allowed_ids
         )
 
         total_pairs = n * (n - 1) / 2

@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 import tempfile
 import os
+
+from typing import List, Optional
 from datetime import datetime, timezone
 
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -23,20 +25,28 @@ class VideoAnalyzer:
         self,
         db: AsyncSession,
         channel_id: str,
-        sample_size: int = 10
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
     ) -> Dict:
         """Analyze videos for static content using Gemini"""
-
+        conds = [Video.channel_id == channel_id]
+        if from_date:
+            if from_date.tzinfo is not None:
+                from_date = from_date.replace(tzinfo=None)
+            conds.append(Video.upload_date >= from_date)
+        if to_date:
+            if to_date.tzinfo is not None:
+                to_date = to_date.replace(tzinfo=None)
+            conds.append(Video.upload_date <= to_date)
+            
         # Get unanalyzed videos
         result = await db.exec(
-            select(Video).where(
-                and_(
-                    Video.channel_id == channel_id
-                )
-            )
+            select(Video).where(and_(*conds))
         )
         videos = result.all()
-
+        
+        await db.commit()
+        
         if not videos:
             return {
                 "channel_id": str(channel_id),
@@ -51,28 +61,22 @@ class VideoAnalyzer:
 
         for video in videos:
             try:
-                if video.is_static_video is None:
+                if video.is_static_video is None and video.duration:
                     video_url = f"https://www.youtube.com/watch?v={video.video_id}"
 
                     try:
-                        if video.duration < 100:
-                            time_segment = video.duration // 2
-                        elif video.duration < 1000:
-                            time_segment = video.duration // 20
-                        elif video.duration < 10000:
-                            time_segment = video.duration // 200
+                        if video.duration < 420:
+                            start_offset = f"{int(0)}s"
+                            end_offset = f"{int(video.duration - 1)}s"
                         else:
-                            time_segment = video.duration // 2000
+                            start_offset = f"{int(0)}s"
+                            end_offset = f"{int(420)}s"
                     except Exception as e:
                         logger.error(f"Failed to determine time segment for video {video.video_id}: {e}")
                         time_segment = 10
 
-                    start_offset = f"{int(time_segment)}s"
-                    end_offset = f"{int(time_segment * 2)}s"
-
                     # Analyze with Gemini
                     analysis = await embedding_client.analyze_video_with_gemini(video_url, start_offset, end_offset)
-
 
                     is_static = analysis.get("is_static", False)
                     confidence = analysis.get("confidence", 0.0)
@@ -98,6 +102,9 @@ class VideoAnalyzer:
                         "confidence": confidence,
                         "method": method
                     })
+                    
+                    await db.commit()
+                    await asyncio.sleep(0)
                 else:
                     # Already analyzed, skip
                     results.append({
@@ -112,9 +119,12 @@ class VideoAnalyzer:
                         static_count += 1
 
             except Exception as e:
-                logger.error(f"Failed to analyze video {video.video_id}: {e}")
-
-        await db.commit()
+                logger.error(f"Failed to analyze video {video.video_id} with Gemini, segment {start_offset} to {end_offset}: {e}")
+                if db.in_transaction():
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass 
 
         static_ratio = static_count / analyzed_count if analyzed_count > 0 else 0
 

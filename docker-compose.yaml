@@ -63,6 +63,23 @@ services:
 
     command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 
+  scheduler:
+    image: krntl/scheduler:latest
+    container_name: dev-scheduler
+
+    restart: unless-stopped
+
+    ports:
+      - 8002:8002
+    volumes:
+      - "./scheduler:/app"
+
+    networks:
+      - yt-network
+
+    command: uvicorn main:app --host 0.0.0.0 --port 8002 --reload
+
+
   qdrant-yt:
     image: qdrant/qdrant:v1.14.1
     container_name: dev-qdrant-yt

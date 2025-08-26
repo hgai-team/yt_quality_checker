@@ -83,19 +83,26 @@ class VectorStore:
         point: PointStruct,
         channel_id: Optional[str] = None,
         limit: int = 10,
-        score_threshold: float = 0.8
+        score_threshold: float = 0.8,
+        allowed_ids: Optional[set[str]] = None
     ) -> List[Dict]:
         """Search for similar embeddings"""
+        
+        must_conds = [
+            FieldCondition(
+                key="channel_id",
+                match=MatchValue(value=channel_id)
+            )
+        ]
+        if allowed_ids:
+            must_conds.append(
+                HasIdCondition(has_id=list(allowed_ids))
+            )
 
         filter_conditions = None
         if channel_id:
             filter_conditions = Filter(
-                must=[
-                    FieldCondition(
-                        key="channel_id",
-                        match=MatchValue(value=channel_id)
-                    )
-                ],
+                must=must_conds,
                 must_not=[
                     HasIdCondition(
                         has_id=[point.id]
@@ -129,21 +136,29 @@ class VectorStore:
         channel_id: str,
         threshold: float = 0.92,
         extra_key: str = "thumbnail_url",
-        text_preview: bool = False
+        text_preview: bool = False,
+        allowed_ids: Optional[set[str]] = None
     ) -> List[tuple]:
         """Find all duplicate pairs within a channel"""
+        must_conds = [
+            FieldCondition(
+                key="channel_id",
+                match=MatchValue(value=channel_id)
+            )
+        ]
+        
+        if allowed_ids:
+            must_conds.append(
+                HasIdCondition(has_id=list(allowed_ids))
+            )
+        
         total = await self.count(collection_name)
 
         # Get all points for channel
         points, _ = await self.client.scroll(
             collection_name=collection_name,
             scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="channel_id",
-                        match=MatchValue(value=channel_id)
-                    )
-                ]
+                must=must_conds
             ),
             limit=total,
             with_payload=True,
@@ -157,6 +172,11 @@ class VectorStore:
             p_vid = p_pl.get("video_id")
             if not p_vid:
                 continue
+            
+            _allowed_ids = None
+            if allowed_ids:
+                _allowed_ids = allowed_ids.copy()
+                _allowed_ids.discard(point.id)
 
             # lấy extra theo key
             p_extra = p_pl.get(extra_key)
@@ -168,7 +188,8 @@ class VectorStore:
                 point=point,
                 channel_id=channel_id,
                 limit=20,
-                score_threshold=threshold
+                score_threshold=threshold,
+                allowed_ids=_allowed_ids
             )
 
             for match in similar:

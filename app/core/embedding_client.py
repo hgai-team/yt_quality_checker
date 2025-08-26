@@ -3,6 +3,8 @@ import asyncio
 import structlog
 import numpy as np
 
+from aiolimiter import AsyncLimiter
+
 from google import genai
 from google.genai import types
 
@@ -23,6 +25,8 @@ class EmbeddingClient:
         self.client = genai.Client(
             api_key=settings.gemini_api_key,
         )
+        
+        self.video_limiter = AsyncLimiter(20, 90)
 
     async def embed_image(self, image: Image.Image) -> np.ndarray:
         """Get embedding for single image using SigLIP service"""
@@ -109,67 +113,68 @@ class EmbeddingClient:
 
     async def analyze_video_with_gemini(self, video_url: str, start_offset: str = None, end_offset: str = None) -> dict:
         """Analyze video using Gemini"""
-        try:
-            # Upload video file
+        async with self.video_limiter:
+            try:
+                # Upload video file
 
-            prompt = """
-            Analyze this video and determine if it's essentially a static image video.
+                prompt = """
+                Analyze this video and determine if it's essentially a static image video.
 
-            Consider:
-            1. Is the main content static (unchanging image)?
-            2. Are there only minor effects like zooming, panning, or text overlays?
-            3. Is there any meaningful motion or scene changes?
+                Consider:
+                1. Is the main content static (unchanging image)?
+                2. Are there only minor effects like zooming, panning, or text overlays?
+                3. Is there any meaningful motion or scene changes?
 
-            A video is considered "static" if:
-            - It shows the same image throughout
-            - Only has minor camera movements or effects
-            - Has no meaningful content changes
+                A video is considered "static" if:
+                - It shows the same image throughout
+                - Only has minor camera movements or effects
+                - Has no meaningful content changes
 
-            Respond in JSON format:
-            {
-                "is_static": true/false,
-                "confidence": 0.0-1.0,
-                "reasoning": "explanation",
-                "detected_elements": {
-                    "has_motion": true/false,
-                    "motion_type": "none/minor/significant",
-                    "has_scene_changes": true/false,
-                    "has_effects": true/false,
-                    "effect_types": []
+                Respond in JSON format:
+                {
+                    "is_static": true/false,
+                    "confidence": 0.0-1.0,
+                    "reasoning": "explanation",
+                    "detected_elements": {
+                        "has_motion": true/false,
+                        "motion_type": "none/minor/significant",
+                        "has_scene_changes": true/false,
+                        "has_effects": true/false,
+                        "effect_types": []
+                    }
                 }
-            }
-            """
+                """
 
-            response = await asyncio.to_thread(
-                self.client.models.generate_content,
-                model=settings.gemini_model,
-                contents=types.Content(
-                    parts=[
-                        types.Part(
-                            file_data=types.FileData(file_uri=video_url),
-                            video_metadata=types.VideoMetadata(
-                                start_offset='10s' if start_offset is None else start_offset,
-                                end_offset='30s' if end_offset is None else end_offset
-                            )
-                        ),
-                        types.Part(text=prompt)
-                    ]
+                response = await asyncio.to_thread(
+                    self.client.models.generate_content,
+                    model=settings.gemini_model,
+                    contents=types.Content(
+                        parts=[
+                            types.Part(
+                                file_data=types.FileData(file_uri=video_url),
+                                video_metadata=types.VideoMetadata(
+                                    start_offset='10s' if start_offset is None else start_offset,
+                                    end_offset='30s' if end_offset is None else end_offset
+                                )
+                            ),
+                            types.Part(text=prompt)
+                        ]
+                    )
                 )
-            )
 
-            # Parse JSON response
-            import json
-            result_text = response.text.strip()
-            if result_text.startswith("```json"):
-                result_text = result_text[7:-3]
+                # Parse JSON response
+                import json
+                result_text = response.text.strip()
+                if result_text.startswith("```json"):
+                    result_text = result_text[7:-3]
 
-            result = json.loads(result_text)
+                result = json.loads(result_text)
 
-            return result
+                return result
 
-        except Exception as e:
-            logger.error(f"Gemini video analysis failed: {e}")
-            raise
+            except Exception as e:
+                logger.error(f"Gemini video analysis failed: {e}")
+                raise
 
 
 # Global instance

@@ -211,3 +211,4 @@ __marimo__/
 *.pt
 *.ckpt
 model_weights/
+*.xlsx

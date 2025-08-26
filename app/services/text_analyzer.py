@@ -3,7 +3,9 @@ import asyncio
 import uuid
 import numpy as np
 
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+from datetime import datetime
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, and_
@@ -139,43 +141,59 @@ class TextAnalyzer:
     async def analyze_channel_text(
         self,
         db: AsyncSession,
-        channel_id: str
+        channel_id: str,
+        from_date: Optional[datetime] = None,
+        to_date: Optional[datetime] = None,
     ) -> Dict:
         """Analyze text duplicates"""
+        def _conds(field_embed):
+            nonlocal from_date, to_date
+            conds = [Video.channel_id == channel_id, field_embed.isnot(None)]
+            if from_date:
+                if from_date.tzinfo is not None:
+                    from_date = from_date.replace(tzinfo=None)
+                conds.append(Video.upload_date >= from_date)
+            if to_date:
+                if to_date.tzinfo is not None:
+                    to_date = to_date.replace(tzinfo=None)
+                conds.append(Video.upload_date <= to_date)
+            return conds
+        
+        result_titles = await db.exec(
+            select(Video).where(and_(*_conds(Video.title_embedding_id)))
+        )
+        videos_titles = result_titles.all()
+        ids_titles = {await self.text_to_uuid(v.video_id) for v in videos_titles}
+        
+        result_desc = await db.exec(
+            select(Video).where(and_(*_conds(Video.description_embedding_id)))
+        )
+        videos_desc = result_desc.all()
+        ids_desc = {await self.text_to_uuid(v.video_id) for v in videos_desc}
 
         title_task = vector_store.find_duplicates_in_channel(
             "youtube_titles",
             str(channel_id),
             threshold=settings.text_similarity_threshold,
             extra_key="text",
-            text_preview=True
+            text_preview=True,
+            allowed_ids=ids_titles
         )
         desc_task = vector_store.find_duplicates_in_channel(
             "youtube_descriptions",
             str(channel_id),
             threshold=settings.text_similarity_threshold,
             extra_key="text",
-            text_preview=True
+            text_preview=True,
+            allowed_ids=ids_desc
         )
 
         title_duplicates, desc_duplicates = await asyncio.gather(title_task, desc_task)
 
-        result_titles = await db.exec(
-            select(Video).where(
-                and_(Video.channel_id == channel_id, Video.title_embedding_id.isnot(None))
-            )
-        )
-        videos_titles = result_titles.all()
         n_titles = len(videos_titles)
         total_pairs_titles = n_titles * (n_titles - 1) / 2 if n_titles else 0
         ratio_titles = (len(title_duplicates) / total_pairs_titles) if total_pairs_titles else 0.0
 
-        result_desc = await db.exec(
-            select(Video).where(
-                and_(Video.channel_id == channel_id, Video.description_embedding_id.isnot(None))
-            )
-        )
-        videos_desc = result_desc.all()
         n_desc = len(videos_desc)
         total_pairs_desc = n_desc * (n_desc - 1) / 2 if n_desc else 0
         ratio_desc = (len(desc_duplicates) / total_pairs_desc) if total_pairs_desc else 0.0

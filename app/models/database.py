@@ -129,6 +129,11 @@ class AnalysisResult(Base):
     issues = Column(JSONB)
     recommendations = Column(JSONB)
     severity_score = Column(Float)  # 0-100
+    
+    # Snapshot metadata
+    source_last_checked = Column(DateTime(timezone=True))  # thời điểm channel.last_checked lúc chạy phân tích
+    filter_from = Column(DateTime(timezone=True), nullable=True)  # None = toàn bộ
+    filter_to   = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     channel = relationship(
@@ -140,4 +145,5 @@ class AnalysisResult(Base):
     __table_args__ = (
         Index('idx_analysis_date', 'analysis_date'),
         Index('idx_analysis_channel_date', 'channel_id', 'analysis_date'),
+        Index('idx_analysis_channel_filter', 'channel_id', 'filter_from', 'filter_to'),
     )
