@@ -144,8 +144,14 @@ class TextAnalyzer:
         channel_id: str,
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        text_similarity_threshold: Optional[float] = None,
+        duplicate_threshold: Optional[float] = None
     ) -> Dict:
         """Analyze text duplicates"""
+        # Use provided threshold or default
+        threshold = text_similarity_threshold or settings.text_similarity_threshold
+        duplicate_threshold = duplicate_threshold or settings.duplicate_threshold
+
         def _conds(field_embed):
             nonlocal from_date, to_date
             conds = [Video.channel_id == channel_id, field_embed.isnot(None)]
@@ -158,13 +164,13 @@ class TextAnalyzer:
                     to_date = to_date.replace(tzinfo=None)
                 conds.append(Video.upload_date <= to_date)
             return conds
-        
+
         result_titles = await db.exec(
             select(Video).where(and_(*_conds(Video.title_embedding_id)))
         )
         videos_titles = result_titles.all()
         ids_titles = {await self.text_to_uuid(v.video_id) for v in videos_titles}
-        
+
         result_desc = await db.exec(
             select(Video).where(and_(*_conds(Video.description_embedding_id)))
         )
@@ -174,7 +180,7 @@ class TextAnalyzer:
         title_task = vector_store.find_duplicates_in_channel(
             "youtube_titles",
             str(channel_id),
-            threshold=settings.text_similarity_threshold,
+            threshold=threshold,
             extra_key="text",
             text_preview=True,
             allowed_ids=ids_titles
@@ -182,7 +188,7 @@ class TextAnalyzer:
         desc_task = vector_store.find_duplicates_in_channel(
             "youtube_descriptions",
             str(channel_id),
-            threshold=settings.text_similarity_threshold,
+            threshold=threshold,
             extra_key="text",
             text_preview=True,
             allowed_ids=ids_desc
@@ -203,12 +209,12 @@ class TextAnalyzer:
                 "ratio": ratio_titles,
                 "total_videos": n_titles,
                 "duplicate_pairs": title_duplicates,
-                "threshold_exceeded": ratio_titles > settings.duplicate_threshold
+                "threshold_exceeded": ratio_titles > duplicate_threshold
             },
             "description_duplicates": {
                 "ratio": ratio_desc,
                 "total_videos": n_desc,
                 "duplicate_pairs": desc_duplicates,
-                "threshold_exceeded": ratio_desc > settings.duplicate_threshold
+                "threshold_exceeded": ratio_desc > duplicate_threshold
             }
         }

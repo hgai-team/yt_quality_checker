@@ -129,6 +129,7 @@ class AnalysisResult(Base):
     # Business rules
     uses_mbt = Column(Boolean)
     mbt_usage_ratio = Column(Float)
+    non_mbt_videos = Column(JSONB)
     project_compliance = Column(Boolean)
     project_compliance_ratio = Column(Float)
     non_compliant_videos = Column(JSONB)

@@ -139,8 +139,14 @@ class ThumbnailAnalyzer:
         channel_id: str,
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        image_similarity_threshold: Optional[float] = None,
+        duplicate_threshold: Optional[float] = None
     ) -> Dict:
         """Find duplicate thumbnails using vector similarity"""
+        # Use provided threshold or default
+        threshold = image_similarity_threshold or settings.image_similarity_threshold
+        duplicate_threshold = duplicate_threshold or settings.duplicate_threshold
+
         conds = [Video.channel_id == channel_id, Video.thumbnail_embedding_id.isnot(None)]
         if from_date:
             if from_date.tzinfo is not None:
@@ -164,12 +170,12 @@ class ThumbnailAnalyzer:
                     "threshold_exceeded": False
                 }
             }
-            
+
         allowed_ids = {await self.text_to_uuid(v.video_id) for v in videos}
         dup_pairs = await vector_store.find_duplicates_in_channel(
             "youtube_thumbnails",
             channel_id,
-            threshold=settings.image_similarity_threshold,
+            threshold=threshold,
             allowed_ids=allowed_ids
         )
 
@@ -181,7 +187,7 @@ class ThumbnailAnalyzer:
                 "ratio": duplicate_ratio,
                 "total_videos": n,
                 "duplicate_pairs": dup_pairs,
-                "threshold_exceeded": duplicate_ratio > settings.duplicate_threshold
+                "threshold_exceeded": duplicate_ratio > duplicate_threshold
             }
         }
 
