@@ -399,100 +399,131 @@ async def list_channels_with_issues(
     project_name: Optional[str] = Query(None),
     networks: Optional[str] = Query(None),
     department: Optional[str] = Query(None),
+    from_date: Optional[datetime] = Query(None),
+    to_date: Optional[datetime] = Query(None),
 ):
     """Lấy snapshot mới nhất mỗi kênh và lọc kênh đang 'vi phạm' (theo severity hoặc quy tắc)."""
+
     async with PEM.get_session() as db:
-        # Subquery: latest analysis per channel
-        subq = (
-            select(
-                AnalysisResult.channel_id,
-                func.max(AnalysisResult.analysis_date).label("maxd")
-            )
-            .group_by(AnalysisResult.channel_id)
-            .subquery()
-        )
+        # Get all channels first
+        channel_query = select(Channel)
+        where_clauses = []
 
-        # Base join of latest analysis with channel
-        base = (
-            select(AnalysisResult, Channel)
-            .join(subq, and_(
-                AnalysisResult.channel_id == subq.c.channel_id,
-                AnalysisResult.analysis_date == subq.c.maxd
-            ))
-            .join(Channel, Channel.channel_id == AnalysisResult.channel_id)
-        )
-
-        # Violation predicate in SQL
-        violate_pred = (
-            (AnalysisResult.severity_score >= min_severity)
-            | (func.coalesce(AnalysisResult.thumbnail_duplicate_ratio, 0) > settings.duplicate_threshold)
-            | (func.coalesce(AnalysisResult.title_duplicate_ratio, 0) > settings.duplicate_threshold)
-            | (func.coalesce(AnalysisResult.description_duplicate_ratio, 0) > settings.duplicate_threshold)
-            | (func.coalesce(AnalysisResult.static_video_ratio, 0) > getattr(settings, "static_video_threshold", 0.5))
-            | (func.coalesce(AnalysisResult.days_inactive, 0) > settings.inactive_days)
-            | (AnalysisResult.project_compliance == False)
-        )
-
-        where_clauses = [violate_pred]
-
-        # Optional filters
         if search:
             s = f"%{search.lower()}%"
             where_clauses.append(
                 func.lower(Channel.channel_name).like(s) | func.lower(Channel.channel_id).like(s)
             )
         if project_name:
-            where_clauses.append((Channel.project_name == project_name))
+            where_clauses.append(Channel.project_name == project_name)
         if networks:
-            where_clauses.append((Channel.networks == networks))
+            where_clauses.append(Channel.networks == networks)
         if department:
-            where_clauses.append((Channel.department == department))
+            where_clauses.append(Channel.department == department)
 
-        # Compose filtered query
-        filtered_q = base.where(and_(*where_clauses))
+        if where_clauses:
+            channel_query = channel_query.where(and_(*where_clauses))
 
-        # Count total items
-        count_q = select(func.count()).select_from(filtered_q.subquery())
-        total_items = (await db.exec(count_q)).one()
+        channels_res = await db.exec(channel_query)
+        channels = channels_res.all()
 
-        # Apply order and pagination
-        paged_q = (
-            filtered_q
-            .order_by(AnalysisResult.severity_score.desc())
-            .offset((page - 1) * limit)
-            .limit(limit)
-        )
-
-        res = await db.exec(paged_q)
-        rows = res.all()
-
+        # For each channel, find or create analysis
         items = []
-        for ar, ch in rows:
-            items.append({
-                "channel_id": ar.channel_id,
-                "channel_name": ch.channel_name,
-                "project_name": ch.project_name,
-                "networks": ch.networks,
-                "department": ch.department,
-                "employee_name": ch.employee_name,
-                "severity_score": ar.severity_score,
-                "last_analyzed": ar.analysis_date.isoformat(),
-                "last_synced_at": ch.last_checked and ch.last_checked.isoformat(),
-                "highlights": {
-                    "dup_thumbnail": ar.thumbnail_duplicate_ratio,
-                    "dup_title": ar.title_duplicate_ratio,
-                    "dup_desc": ar.description_duplicate_ratio,
-                    "static_ratio": ar.static_video_ratio,
-                    "inactive_days": ar.days_inactive,
-                    "project_compliant": ar.project_compliance,
-                }
-            })
+        channels_analyzed = 0
+
+        for channel in channels:
+            # Find matching analysis result
+            ar_query = select(AnalysisResult).where(
+                AnalysisResult.channel_id == channel.channel_id
+            )
+
+            # Filter by date range if provided
+            if from_date is not None or to_date is not None:
+                ar_query = ar_query.where(
+                    and_(
+                        AnalysisResult.filter_from == from_date,
+                        AnalysisResult.filter_to == to_date
+                    )
+                )
+            else:
+                # Get latest analysis with no date filter (both None)
+                ar_query = ar_query.where(
+                    and_(
+                        AnalysisResult.filter_from.is_(None),
+                        AnalysisResult.filter_to.is_(None)
+                    )
+                )
+
+            ar_query = ar_query.order_by(AnalysisResult.analysis_date.desc()).limit(1)
+            ar_res = await db.exec(ar_query)
+            ar = ar_res.first()
+
+            if not ar:
+                # Need to analyze this channel - reuse existing analyze_channel logic
+                request = AnalysisRequest(
+                    channel_id=channel.channel_id,
+                    from_date=from_date,
+                    to_date=to_date
+                )
+
+                try:
+                    result = await analyze_channel(request)
+                    channels_analyzed += 1
+
+                    # Get the newly created analysis result
+                    ar_res = await db.exec(ar_query)
+                    ar = ar_res.first()
+                except Exception as e:
+                    logger.error(f"Failed to analyze channel {channel.channel_id}: {e}")
+                    continue
+
+            if ar:
+                # Check if violates rules
+                violates = (
+                    ar.severity_score >= min_severity or
+                    (ar.thumbnail_duplicate_ratio or 0) > settings.duplicate_threshold or
+                    (ar.title_duplicate_ratio or 0) > settings.duplicate_threshold or
+                    (ar.description_duplicate_ratio or 0) > settings.duplicate_threshold or
+                    (ar.static_video_ratio or 0) > getattr(settings, "static_video_threshold", 0.5) or
+                    (ar.days_inactive or 0) > settings.inactive_days or
+                    ar.project_compliance == False
+                )
+
+                if violates:
+                    items.append({
+                        "channel_id": ar.channel_id,
+                        "channel_name": channel.channel_name,
+                        "project_name": channel.project_name,
+                        "networks": channel.networks,
+                        "department": channel.department,
+                        "employee_name": channel.employee_name,
+                        "severity_score": ar.severity_score,
+                        "last_analyzed": ar.analysis_date.isoformat(),
+                        "last_synced_at": channel.last_checked and channel.last_checked.isoformat(),
+                        "highlights": {
+                            "dup_thumbnail": ar.thumbnail_duplicate_ratio,
+                            "dup_title": ar.title_duplicate_ratio,
+                            "dup_desc": ar.description_duplicate_ratio,
+                            "static_ratio": ar.static_video_ratio,
+                            "inactive_days": ar.days_inactive,
+                            "project_compliant": ar.project_compliance,
+                        }
+                    })
+
+        # Sort by severity score
+        items.sort(key=lambda x: x["severity_score"], reverse=True)
+
+        # Apply pagination
+        total_items = len(items)
+        start = (page - 1) * limit
+        end = start + limit
+        paginated_items = items[start:end]
 
         # Pagination meta
         items_per_page = limit
         total_pages = (total_items + items_per_page - 1) // items_per_page if items_per_page > 0 else 1
 
-        # collect lists for filter UI
+        # Collect lists for filter UI
         res_all = await db.exec(select(Channel.project_name, Channel.department, Channel.networks))
         tuple_rows = res_all.all()
         class _R: pass
@@ -503,12 +534,15 @@ async def list_channels_with_issues(
 
         return {
             "status": "success",
-            "count": len(items),
-            "items": items,
+            "count": len(paginated_items),
+            "items": paginated_items,
             "page": page,
             "totalPages": total_pages,
             "totalItems": total_items,
             "itemsPerPage": items_per_page,
+            "from_date": from_date.isoformat() if from_date else None,
+            "to_date": to_date.isoformat() if to_date else None,
+            "channels_analyzed": channels_analyzed,
             **lists_payload
         }
 
