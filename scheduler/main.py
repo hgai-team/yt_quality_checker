@@ -28,6 +28,7 @@ TZ = ZoneInfo(TZ_NAME)
 DEV_YT_BASE_URL = os.getenv("DEV_YT_BASE_URL", "http://dev-yt:8000")
 SYNC_ENDPOINT = os.getenv("SYNC_ENDPOINT", "/api/v1/channels/sync")
 ANALYZE_ENDPOINT = os.getenv("ANALYZE_ENDPOINT", "/api/v1/channels/analyze")
+REANALYZE_ENDPOINT = os.getenv("REANALYZE_ENDPOINT", "/api/v1/channels/reanalyze")
 
 EXCEL_PATH = os.getenv("EXCEL_PATH", "channels_detail.xlsx")
 _EXCEL_SHEET_RAW = os.getenv("EXCEL_SHEET", "").strip()
@@ -101,11 +102,11 @@ def load_channels_from_excel() -> List[Dict[str, Any]]:
 
     # Required column - channel_id
     id_col = pick(EXCEL_ID_COL) or EXCEL_ID_COL
-    
+
     # Optional columns - all safe to handle missing
     prj_col = pick(EXCEL_PROJECT_COL) if EXCEL_PROJECT_COL else None
     frc_col = pick(EXCEL_FORCE_COL) if EXCEL_FORCE_COL else None
-    
+
     # New optional columns
     networks_col = pick(EXCEL_NETWORKS_COL) if EXCEL_NETWORKS_COL else None
     dept_col = pick(EXCEL_DEPARTMENT_COL) if EXCEL_DEPARTMENT_COL else None
@@ -129,20 +130,20 @@ def load_channels_from_excel() -> List[Dict[str, Any]]:
             "project_name": (str(row[prj_col]).strip() if prj_col and pd.notna(row[prj_col]) else None),
             "force_refresh": (_to_bool(row[frc_col]) if frc_col and frc_col in df.columns else False),
         }
-        
+
         # Add new optional fields safely
         if networks_col and networks_col in df.columns and pd.notna(row[networks_col]):
             payload["networks"] = str(row[networks_col]).strip()
-        
+
         if dept_col and dept_col in df.columns and pd.notna(row[dept_col]):
             payload["department"] = str(row[dept_col]).strip()
-            
+
         if emp_name_col and emp_name_col in df.columns and pd.notna(row[emp_name_col]):
             payload["employee_name"] = str(row[emp_name_col]).strip()
-            
+
         if emp_id_col and emp_id_col in df.columns and pd.notna(row[emp_id_col]):
             payload["employee_id"] = str(row[emp_id_col]).strip()
-        
+
         payloads.append(payload)
 
     return payloads
@@ -179,12 +180,12 @@ async def sync_all_channels() -> Dict[str, Any]:
         channels = load_channels_from_excel()
         total = len(channels)
         logger.info(f"Loaded {total} channel(s) from Excel")
-        
+
         # Log sample of loaded data for debugging
         if total > 0:
             sample_channel = channels[0]
             logger.info(f"Sample channel data: {sample_channel}")
-        
+
         if total == 0:
             return {"status": "no_channels"}
 
@@ -208,7 +209,7 @@ async def sync_all_channels() -> Dict[str, Any]:
     except Exception as e:
         logger.exception("Sync failed due to unexpected error")
         return {"status": "error", "error": str(e)}
-    
+
 async def analyze_one_channel(client: httpx.AsyncClient, payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{DEV_YT_BASE_URL.rstrip('/')}{ANALYZE_ENDPOINT}"
     return await post_with_retries(client, url, payload)
@@ -222,12 +223,12 @@ async def analyze_all_channels() -> Dict[str, Any]:
         channels = load_channels_from_excel()
         total = len(channels)
         logger.info(f"Loaded {total} channel(s) from Excel")
-        
+
         # Log sample of loaded data for debugging
         if total > 0:
             sample_channel = channels[0]
             logger.info(f"Sample channel data: {sample_channel}")
-        
+
         if total == 0:
             return {"status": "no_channels"}
 
@@ -252,6 +253,49 @@ async def analyze_all_channels() -> Dict[str, Any]:
         logger.exception("Analze failed due to unexpected error")
         return {"status": "error", "error": str(e)}
 
+async def reanalyze_one_channel(client: httpx.AsyncClient, payload: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{DEV_YT_BASE_URL.rstrip('/')}{REANALYZE_ENDPOINT}"
+    return await post_with_retries(client, url, payload)
+
+async def reanalyze_all_channels() -> Dict[str, Any]:
+    """Đọc Excel và reanalyze tất cả channel."""
+    started_at = datetime.now(TZ).isoformat()
+    logger.info(f"Starting reanalyze at {started_at} ({TZ_NAME})")
+
+    try:
+        channels = load_channels_from_excel()
+        total = len(channels)
+        logger.info(f"Loaded {total} channel(s) from Excel")
+
+        # Log sample of loaded data for debugging
+        if total > 0:
+            sample_channel = channels[0]
+            logger.info(f"Sample channel data: {sample_channel}")
+
+        if total == 0:
+            return {"status": "no_channels"}
+
+        results = {"ok": 0, "fail": 0, "details": []}
+
+        limits = asyncio.Semaphore(12)
+        async with httpx.AsyncClient() as client:
+            async def worker(ch_payload):
+                async with limits:
+                    res = await reanalyze_one_channel(client, {"channel_id": ch_payload["channel_id"]})
+                    if res.get("ok"):
+                        results["ok"] += 1
+                    else:
+                        results["fail"] += 1
+                    results["details"].append({"channel_id": ch_payload["channel_id"], **res})
+
+            await asyncio.gather(*(worker(p) for p in channels))
+
+        logger.info(f"Reanalyze done. OK={results['ok']}, FAIL={results['fail']}")
+        return {"status": "done", **results}
+    except Exception as e:
+        logger.exception("Reanalyze failed due to unexpected error")
+        return {"status": "error", "error": str(e)}
+
 # ----------------------------
 # APScheduler + FastAPI Lifespan
 # ----------------------------
@@ -270,7 +314,7 @@ def add_cron_jobs():
             misfire_grace_time=3600
         )
         logger.info(f"Scheduled daily sync at {hour:02d}:00 {TZ_NAME}")
-    
+
     for hour in (6, 14, 22):
         scheduler.add_job(
             analyze_all_channels,
@@ -316,3 +360,8 @@ async def sync_now():
 async def analyze_now():
     """Cho phép gọi tay để analyze ngay (tuỳ chọn)."""
     return await analyze_all_channels()
+
+@app.post("/reanalyze-now")
+async def reanalyze_now():
+    """Cho phép gọi tay để reanalyze ngay (tuỳ chọn)."""
+    return await reanalyze_all_channels()

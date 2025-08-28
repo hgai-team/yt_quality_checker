@@ -27,7 +27,7 @@ class ChannelRequest(BaseModel):
     channel_id: str
     project_name: Optional[str] = None
     force_refresh: bool = False
-    
+
     # New optional fields from Excel
     networks: Optional[str] = None
     department: Optional[str] = None
@@ -149,7 +149,7 @@ async def analyze_channel(
     channel_monitor = ChannelMonitor()
     video_analyzer = VideoAnalyzer()
     business_rules = BusinessRulesEngine()
-    
+
     async with PEM.get_session() as db:
         ch_res = await db.exec(select(Channel).where(Channel.channel_id == request.channel_id))
         channel = ch_res.first()
@@ -175,7 +175,7 @@ async def analyze_channel(
                 if s.source_last_checked == channel.last_checked:
                     cached = s
                     break
-                
+
     if cached:
         return {
             "status": "success",
@@ -267,7 +267,7 @@ async def analyze_channel(
         "video_analysis": video_result,
         "business_rules": rules_result
     }
-    
+
     async with PEM.get_session() as db:
         ch_res = await db.exec(select(Channel).where(Channel.channel_id == request.channel_id))
         channel = ch_res.first()
@@ -276,7 +276,7 @@ async def analyze_channel(
             source_last_checked=channel.last_checked,
             f_from=request.from_date, f_to=request.to_date
         )
-        
+
     payload["video_analysis"] = {
         "static_ratio": video_result["static_ratio"],
         "static_video_ids": [r["video_id"] for r in video_result.get("results", []) if r.get("is_static")]
@@ -307,19 +307,19 @@ async def sync_channel(
     )
 
     # Update channel information if provided
-    if (request.project_name or request.networks or request.department or 
+    if (request.project_name or request.networks or request.department or
         request.employee_name or request.employee_id):
         async with PEM.get_session() as db:
             channel = await db.exec(
                 select(Channel).where(Channel.channel_id == request.channel_id)
             )
             channel = channel.first()
-            
+
             if channel:
                 # Update existing fields
                 if request.project_name:
                     channel.project_name = request.project_name
-                
+
                 # Update new fields
                 if request.networks is not None:
                     channel.networks = request.networks
@@ -329,7 +329,7 @@ async def sync_channel(
                     channel.employee_name = request.employee_name
                 if request.employee_id is not None:
                     channel.employee_id = request.employee_id
-                
+
                 await db.commit()
                 await db.refresh(channel)
 
@@ -387,7 +387,9 @@ async def process_channel_embeddings(channel_id: str):
         "text": text_result,
         "video": video_result
     }
-    
+
+
+
 @router.get("/issues")
 async def list_channels_with_issues(
     min_severity: float = Query(1.0, ge=0.0, le=100.0),
@@ -509,3 +511,20 @@ async def list_channels_with_issues(
             "itemsPerPage": items_per_page,
             **lists_payload
         }
+
+@router.post("/reanalyze")
+async def reanalyze_channel(
+    request: AnalysisRequest,
+):
+    video_analyzer = VideoAnalyzer()
+    async def run_video():
+        async with PEM.get_session() as db:
+            return await video_analyzer.analyze_channel_videos(db, request.channel_id, reanalyze=True)
+
+    video_result = await asyncio.gather(
+        run_video()
+    )
+
+    return {
+        "video": video_result
+    }

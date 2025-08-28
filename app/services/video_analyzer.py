@@ -27,6 +27,7 @@ class VideoAnalyzer:
         channel_id: str,
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        reanalyze: bool = False
     ) -> Dict:
         """Analyze videos for static content using Gemini"""
         conds = [Video.channel_id == channel_id]
@@ -38,15 +39,15 @@ class VideoAnalyzer:
             if to_date.tzinfo is not None:
                 to_date = to_date.replace(tzinfo=None)
             conds.append(Video.upload_date <= to_date)
-            
+
         # Get unanalyzed videos
         result = await db.exec(
             select(Video).where(and_(*conds))
         )
         videos = result.all()
-        
+
         await db.commit()
-        
+
         if not videos:
             return {
                 "channel_id": str(channel_id),
@@ -61,21 +62,22 @@ class VideoAnalyzer:
 
         for video in videos:
             try:
-                if video.is_static_video is None and video.duration:
+                if video.duration and (video.is_static_video is None or reanalyze):
                     video_url = f"https://www.youtube.com/watch?v={video.video_id}"
 
                     try:
-                        if video.duration < 420:
+                        if video.duration < 600:
                             start_offset = f"{int(0)}s"
                             end_offset = f"{int(video.duration - 1)}s"
                         else:
                             start_offset = f"{int(0)}s"
-                            end_offset = f"{int(420)}s"
+                            end_offset = f"{int(600)}s"
                     except Exception as e:
                         logger.error(f"Failed to determine time segment for video {video.video_id}: {e}")
                         time_segment = 10
 
                     # Analyze with Gemini
+                    logger.info(f"Analyzing video {video.video_id} with Gemini, segment {start_offset} to {end_offset}")
                     analysis = await embedding_client.analyze_video_with_gemini(video_url, start_offset, end_offset)
 
                     is_static = analysis.get("is_static", False)
@@ -102,7 +104,7 @@ class VideoAnalyzer:
                         "confidence": confidence,
                         "method": method
                     })
-                    
+
                     await db.commit()
                     await asyncio.sleep(0)
                 else:
@@ -124,7 +126,7 @@ class VideoAnalyzer:
                     try:
                         await db.rollback()
                     except Exception:
-                        pass 
+                        pass
 
         static_ratio = static_count / analyzed_count if analyzed_count > 0 else 0
 
