@@ -36,7 +36,7 @@ class ChannelRequest(BaseModel):
 class AnalysisRequest(BaseModel):
     channel_id: str
     analysis_types: List[str] = ["all"]
-    sample_size: int = 10
+    get_issues: bool = False
     # bộ lọc thời gian (tuỳ chọn). None = toàn bộ video
     from_date: Optional[datetime] = None
     to_date: Optional[datetime] = None
@@ -471,7 +471,9 @@ async def analyze_channel(
 
     async def run_video_analyzer():
         async with PEM.get_session() as db:
-            return await video_analyzer.analyze_channel_videos(db, request.channel_id, request.from_date, request.to_date)
+            return await video_analyzer.analyze_channel_videos(
+                db=db, channel_id=request.channel_id, from_date=request.from_date,
+                to_date=request.to_date, get_issues=request.get_issues)
 
     async def run_business_rules():
         async with PEM.get_session() as db:
@@ -648,14 +650,15 @@ async def list_channels_with_issues(
     department: Optional[str] = Query(None),
     from_date: Optional[datetime] = Query(None),
     to_date: Optional[datetime] = Query(None),
-    # Custom thresholds - khi có thì không dùng cache
     image_similarity_threshold: Optional[float] = Query(None),
     text_similarity_threshold: Optional[float] = Query(None),
     duplicate_threshold: Optional[float] = Query(None),
 ):
     """Lấy snapshot mới nhất mỗi kênh và lọc kênh đang 'vi phạm' (theo severity hoặc quy tắc)."""
+    import timeit
+    start_time = timeit.default_timer()
+    semaphore = asyncio.Semaphore(16)
 
-    # Get effective thresholds
     thresholds = {
         "image_similarity_threshold": image_similarity_threshold or settings.image_similarity_threshold,
         "text_similarity_threshold": text_similarity_threshold or settings.text_similarity_threshold,
@@ -670,8 +673,9 @@ async def list_channels_with_issues(
         to_date is not None
     ])
 
+    items = []
+    
     async with PEM.get_session() as db:
-        # Get all channels first
         channel_query = select(Channel)
         where_clauses = []
 
@@ -693,130 +697,131 @@ async def list_channels_with_issues(
         channels_res = await db.exec(channel_query)
         channels = channels_res.all()
 
-        # For each channel, find or create analysis
-        items = []
-        channels_analyzed = 0
+        analysis_tasks = []
+        cached_results = []
+        channels_to_process_map = {ch.channel_id: ch for ch in channels}
+
+        async def analyze_with_semaphore(request: AnalysisRequest):
+            async with semaphore:
+                return await analyze_channel(request)
 
         for channel in channels:
-            ar = None
-
             if use_cache:
-                # Try to find existing analysis result
                 ar_query = select(AnalysisResult).where(
                     AnalysisResult.channel_id == channel.channel_id
                 )
-
-                # Filter by date range if provided
                 if from_date is not None or to_date is not None:
                     ar_query = ar_query.where(
-                        and_(
-                            AnalysisResult.filter_from == from_date,
-                            AnalysisResult.filter_to == to_date
-                        )
+                        and_(AnalysisResult.filter_from == from_date, AnalysisResult.filter_to == to_date)
                     )
                 else:
-                    # Get latest analysis with no date filter (both None)
                     ar_query = ar_query.where(
-                        and_(
-                            AnalysisResult.filter_from.is_(None),
-                            AnalysisResult.filter_to.is_(None)
-                        )
+                        and_(AnalysisResult.filter_from.is_(None), AnalysisResult.filter_to.is_(None))
                     )
-
                 ar_query = ar_query.order_by(AnalysisResult.analysis_date.desc()).limit(1)
                 ar_res = await db.exec(ar_query)
                 ar = ar_res.first()
-
-            if not ar:
-                # Need to analyze this channel - reuse existing analyze_channel logic
-                request = AnalysisRequest(
-                    channel_id=channel.channel_id,
-                    from_date=from_date,
-                    to_date=to_date,
-                    image_similarity_threshold=image_similarity_threshold,
-                    text_similarity_threshold=text_similarity_threshold,
-                    duplicate_threshold=duplicate_threshold
-                )
-
-                try:
-                    result = await analyze_channel(request)
-                    channels_analyzed += 1
-
-                    # Create temporary AR object from result for consistency
-                    class TempAR:
-                        def __init__(self, result_data):
-                            self.severity_score = result_data.get("severity_score", 0)
-                            self.channel_id = result_data.get("channel_id")
-                            self.analysis_date = datetime.fromisoformat(result_data["analysis_date"].replace("Z", "+00:00"))
-
-                            thumb = result_data.get("thumbnail_analysis", {}).get("thumbnail_duplicates", {})
-                            text = result_data.get("text_analysis", {})
-                            video = result_data.get("video_analysis", {})
-                            monitor = result_data.get("channel_monitor", {})
-                            business = result_data.get("business_rules", {})
-
-                            self.thumbnail_duplicate_ratio = thumb.get("ratio", 0)
-                            self.title_duplicate_ratio = text.get("title_duplicates", {}).get("ratio", 0)
-                            self.description_duplicate_ratio = text.get("description_duplicates", {}).get("ratio", 0)
-                            self.static_video_ratio = video.get("static_ratio", 0)
-                            self.days_inactive = monitor.get("days_inactive", 0)
-                            self.mbt_usage_ratio = business.get("mbt_ratio", 0)
-                            self.project_compliance_ratio = business.get("project_compliance_ratio", 0)
-
-                    ar = TempAR(result)
-                except Exception as e:
-                    logger.error(f"Failed to analyze channel {channel.channel_id}: {e}")
+                if ar:
+                    cached_results.append(ar)
                     continue
 
-            if ar:
-                # Check if violates rules using current thresholds
-                violates = (
-                    ar.severity_score >= min_severity or
-                    (ar.thumbnail_duplicate_ratio or 0) > thresholds["duplicate_threshold"] or
-                    (ar.title_duplicate_ratio or 0) > thresholds["duplicate_threshold"] or
-                    (ar.description_duplicate_ratio or 0) > thresholds["duplicate_threshold"] or
-                    (ar.static_video_ratio or 0) > getattr(settings, "static_video_threshold", 0.5) or
-                    (ar.days_inactive or 0) > settings.inactive_days or
-                    ar.mbt_usage_ratio < 1 or
-                    ar.project_compliance_ratio < 1
-                )
+            request = AnalysisRequest(
+                channel_id=channel.channel_id,
+                get_issues=True,
+                from_date=from_date,
+                to_date=to_date,
+                image_similarity_threshold=image_similarity_threshold,
+                text_similarity_threshold=text_similarity_threshold,
+                duplicate_threshold=duplicate_threshold
+            )
+            analysis_tasks.append((channel, analyze_with_semaphore(request)))
 
-                if violates:
-                    items.append({
-                        "channel_id": ar.channel_id,
-                        "channel_name": channel.channel_name,
-                        "project_name": channel.project_name,
-                        "networks": channel.networks,
-                        "department": channel.department,
-                        "employee_name": channel.employee_name,
-                        "severity_score": ar.severity_score,
-                        "last_analyzed": ar.analysis_date.isoformat(),
-                        "last_synced_at": channel.last_checked and channel.last_checked.isoformat(),
-                        "highlights": {
-                            "dup_thumbnail": ar.thumbnail_duplicate_ratio,
-                            "dup_title": ar.title_duplicate_ratio,
-                            "dup_desc": ar.description_duplicate_ratio,
-                            "static_ratio": ar.static_video_ratio,
-                            "inactive_days": ar.days_inactive,
-                            "uses_mbt": ar.mbt_usage_ratio,
-                            "project_compliant": ar.project_compliance_ratio,
-                        }
-                    })
+        channels_analyzed = 0
+        newly_analyzed_results = []
+        if analysis_tasks:
+            channels_for_tasks = [ch for ch, task in analysis_tasks]
+            tasks = [task for ch, task in analysis_tasks]
+            
+            results_from_gather = await asyncio.gather(*tasks, return_exceptions=True)
+            channels_analyzed = len(results_from_gather)
 
-        # Sort by severity score
+            for channel, result in zip(channels_for_tasks, results_from_gather):
+                if isinstance(result, Exception):
+                    logger.error(f"Failed to analyze channel {channel.channel_id}: {result}")
+                    continue
+                
+                class TempAR:
+                    def __init__(self, result_data):
+                        self.severity_score = result_data.get("severity_score", 0)
+                        self.channel_id = result_data.get("channel_id")
+                        self.analysis_date = datetime.fromisoformat(result_data["analysis_date"].replace("Z", "+00:00"))
+
+                        thumb = result_data.get("thumbnail_analysis", {}).get("thumbnail_duplicates", {})
+                        text = result_data.get("text_analysis", {})
+                        video = result_data.get("video_analysis", {})
+                        monitor = result_data.get("channel_monitor", {})
+                        business = result_data.get("business_rules", {})
+
+                        self.thumbnail_duplicate_ratio = thumb.get("ratio", 0)
+                        self.title_duplicate_ratio = text.get("title_duplicates", {}).get("ratio", 0)
+                        self.description_duplicate_ratio = text.get("description_duplicates", {}).get("ratio", 0)
+                        self.static_video_ratio = video.get("static_ratio", 0)
+                        self.days_inactive = monitor.get("days_inactive", 0)
+                        self.mbt_usage_ratio = business.get("mbt_ratio", 0)
+                        self.project_compliance_ratio = business.get("project_compliance_ratio", 0)
+
+                newly_analyzed_results.append(TempAR(result))
+        
+        all_results = cached_results + newly_analyzed_results
+
+        for ar in all_results:
+            violates = (
+                ar.severity_score >= min_severity or
+                (ar.thumbnail_duplicate_ratio or 0) > thresholds["duplicate_threshold"] or
+                (ar.title_duplicate_ratio or 0) > thresholds["duplicate_threshold"] or
+                (ar.description_duplicate_ratio or 0) > thresholds["duplicate_threshold"] or
+                (ar.static_video_ratio or 0) > getattr(settings, "static_video_threshold", 0.5) or
+                (ar.days_inactive or 0) > settings.inactive_days or
+                ar.mbt_usage_ratio < 1 or
+                ar.project_compliance_ratio < 1
+            )
+
+            if violates:
+                channel = channels_to_process_map.get(ar.channel_id)
+                if not channel:
+                    continue
+
+                items.append({
+                    "channel_id": ar.channel_id,
+                    "channel_name": channel.channel_name,
+                    "project_name": channel.project_name,
+                    "networks": channel.networks,
+                    "department": channel.department,
+                    "employee_name": channel.employee_name,
+                    "severity_score": ar.severity_score,
+                    "last_analyzed": ar.analysis_date.isoformat(),
+                    "last_synced_at": channel.last_checked and channel.last_checked.isoformat(),
+                    "highlights": {
+                        "dup_thumbnail": ar.thumbnail_duplicate_ratio,
+                        "dup_title": ar.title_duplicate_ratio,
+                        "dup_desc": ar.description_duplicate_ratio,
+                        "static_ratio": ar.static_video_ratio,
+                        "inactive_days": ar.days_inactive,
+                        "uses_mbt": ar.mbt_usage_ratio,
+                        "project_compliant": ar.project_compliance_ratio,
+                    }
+                })
+
         items.sort(key=lambda x: x["severity_score"], reverse=True)
 
-        # Apply pagination
         total_items = len(items)
         start = (page - 1) * limit
         end = start + limit
         paginated_items = items[start:end]
 
-        # Pagination meta
         items_per_page = limit
         total_pages = (total_items + items_per_page - 1) // items_per_page if items_per_page > 0 else 1
 
-        # Collect lists for filter UI
         res_all = await db.exec(select(Channel.project_name, Channel.department, Channel.networks))
         tuple_rows = res_all.all()
         class _R: pass
@@ -837,6 +842,7 @@ async def list_channels_with_issues(
             "to_date": to_date.isoformat() if to_date else None,
             "channels_analyzed": channels_analyzed,
             "thresholds_used": thresholds,
+            "time_taken_seconds": timeit.default_timer() - start_time,
             **lists_payload
         }
 

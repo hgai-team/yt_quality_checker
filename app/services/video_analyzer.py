@@ -27,7 +27,8 @@ class VideoAnalyzer:
         channel_id: str,
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
-        reanalyze: bool = False
+        reanalyze: bool = False,
+        get_issues: bool = False
     ) -> Dict:
         """Analyze videos for static content using Gemini"""
         conds = [Video.channel_id == channel_id]
@@ -62,7 +63,7 @@ class VideoAnalyzer:
 
         for video in videos:
             try:
-                if video.duration and (video.is_static_video is None or reanalyze):
+                if video.duration and (video.is_static_video is None or reanalyze) and not get_issues:
                     video_url = f"https://www.youtube.com/watch?v={video.video_id}"
 
                     try:
